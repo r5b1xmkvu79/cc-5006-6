@@ -136,6 +136,16 @@ func main() {
 		"-vf", markers(), "-frames:v", "1", "-q:v", "2",
 		"-y", p("extreme_narrow.jpg"))
 
+	// 9) Anamorphic DV: coded 720x576 with 64:45 pixel aspect, so the true
+	// display is 1024x576 (16:9). Coded dimensions must never be treated
+	// as display dimensions for this material.
+	run("-f", "lavfi", "-i", "testsrc2=size=720x576:rate=25:duration=6",
+		"-f", "lavfi", "-i", "sine=frequency=550:duration=6",
+		"-vf", markers()+",setsar=64/45",
+		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac",
+		"-metadata", "title=1998年DV宽屏访谈（非方形像素）",
+		"-y", p("dv_anamorphic.mp4"))
+
 	fmt.Println("assets generated in", *out)
 }
 

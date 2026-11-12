@@ -181,9 +181,10 @@ func (s *Server) importMedia(w http.ResponseWriter, r *http.Request) {
 	}
 	m := project.Media{
 		ID: fmt.Sprintf("m%d", len(p.Media)+1), Path: abs, SHA256: info.SHA256,
-		Kind: string(info.Kind), Width: info.Width, Height: info.Height,
+		Kind: string(info.Kind), Width: info.DisplayWidth, Height: info.DisplayHeight,
 		Rotation: info.Rotation, EXIFOrientation: info.EXIFOrientation,
 		Duration: info.Duration, HasAudio: info.HasAudio, Title: info.Title,
+		Description: media.DescriptionFromInfo(info),
 		Status: project.StatusOK,
 	}
 	p.Media = append(p.Media, m)

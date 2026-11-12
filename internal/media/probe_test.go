@@ -130,6 +130,48 @@ func TestProbeMissing(t *testing.T) {
 	}
 }
 
+func TestProbeAnamorphicDV(t *testing.T) {
+	info, err := testProber(t).Probe(assetPath(t, "dv_anamorphic.mp4"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.StoredWidth != 720 || info.StoredHeight != 576 {
+		t.Errorf("stored = %dx%d, want 720x576", info.StoredWidth, info.StoredHeight)
+	}
+	if info.SARNum != 64 || info.SARDen != 45 {
+		t.Errorf("sar = %d:%d, want 64:45", info.SARNum, info.SARDen)
+	}
+	// Coded dimensions are not display dimensions: 720x576 with 64:45
+	// pixels displays as 1024x576.
+	if info.DisplayWidth != 1024 || info.DisplayHeight != 576 {
+		t.Errorf("display = %dx%d, want 1024x576", info.DisplayWidth, info.DisplayHeight)
+	}
+	// Normalized coded dims stay 720x576 (rotation 0).
+	if info.Width != 720 || info.Height != 576 {
+		t.Errorf("normalized coded = %dx%d, want 720x576", info.Width, info.Height)
+	}
+}
+
+func TestParseSAR(t *testing.T) {
+	cases := []struct {
+		in    string
+		n, d  int
+	}{
+		{"64:45", 64, 45},
+		{"1:1", 1, 1},
+		{"0:1", 1, 1},   // unknown -> square
+		{"", 1, 1},      // missing -> square
+		{"N/A", 1, 1},   // malformed -> square
+		{"4:0", 1, 1},   // zero den -> square
+	}
+	for _, c := range cases {
+		n, d := parseSAR(c.in)
+		if n != c.n || d != c.d {
+			t.Errorf("parseSAR(%q) = %d:%d, want %d:%d", c.in, n, d, c.n, c.d)
+		}
+	}
+}
+
 func TestEXIFRoundTrip(t *testing.T) {
 	// Minimal JPEG: SOI + EOI.
 	jpeg := []byte{0xFF, 0xD8, 0xFF, 0xD9}

@@ -22,5 +22,10 @@ cd web && npm test && cd ..
 echo "== frontend build =="
 npm --prefix web run build
 
+echo "== build migration tool =="
+mkdir -p .toolchain/bin
+go build -o .toolchain/bin/oralcut-migrate ./cmd/migrate
+
 echo "== delivery bundle =="
-go run ./cmd/delivercheck -assets "$ORALCUT_ASSETS" -out deliver
+go run ./cmd/delivercheck -assets "$ORALCUT_ASSETS" -out deliver \
+  -migrate-bin "$PWD/.toolchain/bin/oralcut-migrate"

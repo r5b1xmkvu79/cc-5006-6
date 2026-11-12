@@ -64,6 +64,24 @@ func NormalizedSize(w, h, rotation int) (int, int) {
 	return w, h
 }
 
+// DisplaySize derives true display dimensions from coded (stored) size,
+// sample aspect ratio and rotation. Coded dimensions are never treated as
+// display dimensions: width is scaled by the pixel aspect ratio first,
+// then rotation swaps axes. A non-positive SAR means unknown and falls
+// back to square pixels, the same interpretation players apply.
+func DisplaySize(storedW, storedH, sarNum, sarDen, rotation int) (int, int) {
+	if sarNum <= 0 || sarDen <= 0 {
+		sarNum, sarDen = 1, 1
+	}
+	dw := int(math.Round(float64(storedW) * float64(sarNum) / float64(sarDen)))
+	dh := storedH
+	r := ((rotation % 360) + 360) % 360
+	if r == 90 || r == 270 {
+		return dh, dw
+	}
+	return dw, dh
+}
+
 func coverScale(sw, sh, cw, ch float64) float64 {
 	return math.Max(cw/sw, ch/sh)
 }

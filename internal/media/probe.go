@@ -12,6 +12,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"oralcut/internal/geometry"
 )
 
 // Kind classifies a probed source.
@@ -38,9 +40,19 @@ type Info struct {
 	// EXIFOrientation is the raw EXIF value (1-8) for images, 0 if none.
 	EXIFOrientation int `json:"exifOrientation,omitempty"`
 
-	// Width/Height are the normalized display dimensions.
+	// SARNum/SARDen are the sample (pixel) aspect ratio from the container.
+	// 1:1 when the source reports square or unknown pixels.
+	SARNum int `json:"sarNum"`
+	SARDen int `json:"sarDen"`
+
+	// Width/Height are the normalized coded dimensions (rotation applied,
+	// coded pixels). They are NOT display dimensions when SAR is non-square.
 	Width  int `json:"width"`
 	Height int `json:"height"`
+	// DisplayWidth/Height are the true display dimensions: coded size with
+	// pixel aspect ratio and rotation applied.
+	DisplayWidth  int `json:"displayWidth"`
+	DisplayHeight int `json:"displayHeight"`
 
 	Duration  float64 `json:"duration"` // seconds; 0 for stills
 	HasAudio  bool    `json:"hasAudio"`
@@ -62,6 +74,7 @@ type ffprobeOutput struct {
 		Width     int    `json:"width"`
 		Height    int    `json:"height"`
 		Duration  string `json:"duration"`
+		SAR       string `json:"sample_aspect_ratio"`
 		Tags      map[string]string `json:"tags"`
 		SideData  []struct {
 			Type     string  `json:"side_data_type"`
@@ -99,6 +112,7 @@ func (p *Prober) Probe(path string) (*Info, error) {
 		Width     int    `json:"width"`
 		Height    int    `json:"height"`
 		Duration  string `json:"duration"`
+		SAR       string `json:"sample_aspect_ratio"`
 		Tags      map[string]string `json:"tags"`
 		SideData  []struct {
 			Type     string  `json:"side_data_type"`
@@ -147,6 +161,12 @@ func (p *Prober) Probe(path string) (*Info, error) {
 	w, h := normalizedDims(info.StoredWidth, info.StoredHeight, rot, info.EXIFOrientation)
 	info.Width, info.Height = w, h
 
+	// Pixel aspect ratio: coded dimensions are not display dimensions when
+	// SAR is non-square. Unknown SAR ("0:1", empty) means square pixels.
+	info.SARNum, info.SARDen = parseSAR(vstr.SAR)
+	info.DisplayWidth, info.DisplayHeight = geometry.DisplaySize(
+		info.StoredWidth, info.StoredHeight, info.SARNum, info.SARDen, rot)
+
 	info.Duration = parseFloat(fp.Format.Duration)
 	if info.Duration == 0 && vstr.Duration != "" {
 		info.Duration = parseFloat(vstr.Duration)
@@ -174,6 +194,16 @@ func normalizeDegrees(d int) int {
 		return r
 	}
 	return 0
+}
+
+// parseSAR parses ffprobe's "num:den" sample aspect ratio. Unknown or
+// malformed values become 1:1 (square pixels), matching player behavior.
+func parseSAR(s string) (int, int) {
+	var n, d int
+	if _, err := fmt.Sscanf(s, "%d:%d", &n, &d); err == nil && n > 0 && d > 0 {
+		return n, d
+	}
+	return 1, 1
 }
 
 // exifRotation maps EXIF orientation (1-8) to display rotation degrees.

@@ -14,6 +14,20 @@ export function normalizedSize(w, h, rotation) {
   return r === 90 || r === 270 ? [h, w] : [w, h]
 }
 
+// displaySize derives true display dimensions from coded size, sample
+// aspect ratio and rotation: width scales by SAR first, then rotation
+// swaps axes. Non-positive SAR means unknown -> square pixels.
+export function displaySize(storedW, storedH, sarNum, sarDen, rotation) {
+  if (sarNum <= 0 || sarDen <= 0) {
+    sarNum = 1
+    sarDen = 1
+  }
+  const dw = Math.round((storedW * sarNum) / sarDen)
+  const dh = storedH
+  const r = ((rotation % 360) + 360) % 360
+  return r === 90 || r === 270 ? [dh, dw] : [dw, dh]
+}
+
 const coverScale = (sw, sh, cw, ch) => Math.max(cw / sw, ch / sh)
 const fitScale = (sw, sh, cw, ch) => Math.min(cw / sw, ch / sh)
 const clamp01 = (v) => Math.min(1, Math.max(0, v))

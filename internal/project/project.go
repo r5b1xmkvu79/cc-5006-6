@@ -12,7 +12,14 @@ import (
 	"time"
 
 	"oralcut/internal/geometry"
+	"oralcut/internal/media"
 )
+
+// FormatVersionCurrent is the project file format written by this build.
+// Version 1 (legacy) scattered aspect/rotation across flat media fields
+// and had no pixel ratio; version 2 adds the unified versioned media
+// description per media entry.
+const FormatVersionCurrent = 2
 
 // MediaStatus is the integrity state of a referenced source file.
 type MediaStatus string
@@ -32,8 +39,8 @@ type Media struct {
 	SHA256 string `json:"sha256"`
 
 	Kind     string  `json:"kind"` // "video" | "image"
-	Width    int     `json:"width"`  // normalized (post-rotation) dimensions
-	Height   int     `json:"height"`
+	Width    int     `json:"width"`  // display dimensions; on legacy (v1) files these were
+	Height   int     `json:"height"` // post-rotation coded dimensions with square pixels assumed
 	Rotation int     `json:"rotation"`
 	// EXIFOrientation preserves the raw EXIF tag for images so the
 	// renderer can apply the exact normalization transform.
@@ -42,10 +49,26 @@ type Media struct {
 	HasAudio bool    `json:"hasAudio"`
 	Title    string  `json:"title,omitempty"`
 
+	// Description is the unified versioned media description (format v2).
+	// When present it is the source of truth for display geometry; the
+	// flat fields above mirror it for older readers.
+	Description *media.Description `json:"description,omitempty"`
+
 	Status MediaStatus `json:"status"`
 	// Reason explains missing/changed status; kept so the project opens
 	// with a meaningful placeholder.
 	Reason string `json:"reason,omitempty"`
+}
+
+// DisplayDims returns the true display dimensions. The unified
+// description wins when present; legacy flat fields are the fallback for
+// pre-migration (v1) projects, where they recorded post-rotation coded
+// dimensions under a square-pixel assumption.
+func (m *Media) DisplayDims() (int, int) {
+	if m.Description != nil && m.Description.DisplayWidth > 0 && m.Description.DisplayHeight > 0 {
+		return m.Description.DisplayWidth, m.Description.DisplayHeight
+	}
+	return m.Width, m.Height
 }
 
 // ClipKind distinguishes how time is modeled for a clip.
@@ -123,11 +146,19 @@ type Canvas struct {
 type Project struct {
 	ID        string   `json:"id"`
 	Title     string   `json:"title"`
+	// FormatVersion is absent/1 on legacy files, 2 once the unified media
+	// description is present.
+	FormatVersion int            `json:"formatVersion,omitempty"`
 	Canvas    Canvas   `json:"canvas"`
 	Media     []Media  `json:"media"`
 	Clips     []Clip   `json:"clips"`
 	CreatedAt string   `json:"createdAt"`
 	UpdatedAt string   `json:"updatedAt"`
+	// Legacy preserves the pre-migration envelope (original unknown fields,
+	// overridden clip confirmations) so a rollback can restore the old
+	// format faithfully. Written by the migration tool, carried through
+	// app saves untouched.
+	Legacy json.RawMessage `json:"legacy,omitempty"`
 }
 
 func New(id, title string) *Project {
@@ -135,6 +166,7 @@ func New(id, title string) *Project {
 	return &Project{
 		ID:    id,
 		Title: title,
+		FormatVersion: FormatVersionCurrent,
 		Canvas: Canvas{Width: 1920, Height: 1080, FPS: 30, Background: "black"},
 		CreatedAt: now,
 		UpdatedAt: now,
@@ -154,6 +186,7 @@ func (p *Project) MediaByID(id string) *Media {
 // Save writes the project JSON.
 func (p *Project) Save(dir string) error {
 	p.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	p.NormalizeForSave()
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
@@ -162,6 +195,30 @@ func (p *Project) Save(dir string) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, p.ID+".json"), data, 0o644)
+}
+
+// NormalizeForSave mirrors the unified media description into the flat
+// compat fields and bumps the format version once any description exists.
+// It does not touch timestamps so the migration tool can produce files
+// without save side effects.
+func (p *Project) NormalizeForSave() {
+	hasDesc := false
+	for i := range p.Media {
+		m := &p.Media[i]
+		if m.Description == nil {
+			continue
+		}
+		hasDesc = true
+		d := m.Description
+		m.Width, m.Height = d.DisplayWidth, d.DisplayHeight
+		m.Rotation = d.Rotation
+		m.EXIFOrientation = d.EXIFOrientation
+		m.Duration = d.Duration
+		m.HasAudio = d.HasAudio
+	}
+	if hasDesc && p.FormatVersion < FormatVersionCurrent {
+		p.FormatVersion = FormatVersionCurrent
+	}
 }
 
 // Load reads a project file. It never fails because a source file is
@@ -244,8 +301,15 @@ func (p *Project) Validate(allowPlaceholder bool) []Issue {
 			issues = append(issues, Issue{ClipID: c.ID, Level: "error",
 				Message: fmt.Sprintf("片段 %s 使用裁切填充但裁切位置未经编辑确认", c.Label)})
 		}
+		if m.Description != nil {
+			if _, _, ok := m.Description.Rederive(); !ok {
+				issues = append(issues, Issue{ClipID: c.ID, MediaID: m.ID, Level: "error",
+					Message: fmt.Sprintf("片段 %s 的媒体描述内部不一致（显示尺寸与编码/像素比例推导不符）", c.Label)})
+			}
+		}
 		if m.Status == StatusOK {
-			if _, err := geometry.LayoutFor(float64(m.Width), float64(m.Height),
+			dw, dh := m.DisplayDims()
+			if _, err := geometry.LayoutFor(float64(dw), float64(dh),
 				float64(p.Canvas.Width), float64(p.Canvas.Height), c.Fit, c.Crop.X, c.Crop.Y); err != nil {
 				issues = append(issues, Issue{ClipID: c.ID, Level: "error",
 					Message: fmt.Sprintf("片段 %s 构图无效: %v", c.Label, err)})
@@ -254,7 +318,7 @@ func (p *Project) Validate(allowPlaceholder bool) []Issue {
 				if c.Kind != ClipPhoto || c.Fit != geometry.FitCrop {
 					issues = append(issues, Issue{ClipID: c.ID, Level: "error",
 						Message: fmt.Sprintf("片段 %s 平移仅适用于裁切模式的照片", c.Label)})
-				} else if err := geometry.ValidatePan(float64(m.Width), float64(m.Height),
+				} else if err := geometry.ValidatePan(float64(dw), float64(dh),
 					float64(p.Canvas.Width), float64(p.Canvas.Height), *c.Pan); err != nil {
 					issues = append(issues, Issue{ClipID: c.ID, Level: "error",
 						Message: fmt.Sprintf("片段 %s 平移取景范围无效: %v", c.Label, err)})

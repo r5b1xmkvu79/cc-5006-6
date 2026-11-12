@@ -27,6 +27,30 @@ func TestNormalizedSize(t *testing.T) {
 	}
 }
 
+func TestDisplaySize(t *testing.T) {
+	cases := []struct {
+		name                   string
+		sw, sh, sarN, sarD, rot int
+		ew, eh                 int
+	}{
+		{"square pixels", 1920, 1080, 1, 1, 0, 1920, 1080},
+		{"pal dv widescreen 64:45", 720, 576, 64, 45, 0, 1024, 576},
+		{"pal dv 4:3", 720, 576, 16, 15, 0, 768, 576},
+		{"hdv anamorphic", 1440, 1080, 4, 3, 0, 1920, 1080},
+		{"anamorphic rotated", 720, 576, 64, 45, 90, 576, 1024},
+		{"square rotated", 1280, 720, 1, 1, 270, 720, 1280},
+		{"unknown sar falls back to square", 640, 480, 0, 0, 0, 640, 480},
+		{"negative sar falls back to square", 640, 480, -4, 3, 0, 640, 480},
+	}
+	for _, c := range cases {
+		w, h := DisplaySize(c.sw, c.sh, c.sarN, c.sarD, c.rot)
+		if w != c.ew || h != c.eh {
+			t.Errorf("%s: DisplaySize(%d,%d,%d,%d,%d) = %dx%d, want %dx%d",
+				c.name, c.sw, c.sh, c.sarN, c.sarD, c.rot, w, h, c.ew, c.eh)
+		}
+	}
+}
+
 func TestLayoutFullPreservesEverything(t *testing.T) {
 	// 4:3 source on 16:9 canvas.
 	l, err := LayoutFor(640, 480, 1920, 1080, FitFull, 0, 0)
@@ -144,6 +168,25 @@ type parityCase struct {
 	Err    string  `json:"err"`
 }
 
+// displaySizeCase pins the coded->display derivation (SAR + rotation)
+// between Go and JS.
+type displaySizeCase struct {
+	Name             string `json:"name"`
+	StoredW          int    `json:"storedW"`
+	StoredH          int    `json:"storedH"`
+	SARNum           int    `json:"sarNum"`
+	SARDen           int    `json:"sarDen"`
+	Rotation         int    `json:"rotation"`
+	DisplayW         int    `json:"displayW"`
+	DisplayH         int    `json:"displayH"`
+}
+
+// parityFixture is the shared golden file structure.
+type parityFixture struct {
+	Layout      []parityCase      `json:"layout"`
+	DisplaySize []displaySizeCase `json:"displaySize"`
+}
+
 // TestParityFixture regenerates web/test/geometry_cases.json. The JS
 // geometry implementation must produce identical results for every case.
 func TestParityFixture(t *testing.T) {
@@ -168,8 +211,10 @@ func TestParityFixture(t *testing.T) {
 		{"extreme_narrow_crop", 4000, 160, 1920, 1080, FitCrop, 0.5, 0.5},
 		{"square_full", 1000, 1000, 1920, 1080, FitFull, 0, 0},
 		{"square_border", 1000, 1000, 1920, 1080, FitBorder, 0, 0},
+		{"dv_anamorphic_display_full", 1024, 576, 1920, 1080, FitFull, 0, 0},
+		{"dv_anamorphic_display_crop_top", 1024, 576, 1920, 1080, FitCrop, 0.5, 0},
 	}
-	var cases []parityCase
+	fix := parityFixture{}
 	for _, in := range inputs {
 		l, err := LayoutFor(in.SW, in.SH, in.CW, in.CH, in.Mode, in.CropX, in.CropY)
 		c := parityCase{
@@ -179,9 +224,23 @@ func TestParityFixture(t *testing.T) {
 		if err != nil {
 			c.Err = err.Error()
 		}
-		cases = append(cases, c)
+		fix.Layout = append(fix.Layout, c)
 	}
-	data, err := json.MarshalIndent(cases, "", "  ")
+	dsInputs := []displaySizeCase{
+		{Name: "square_no_rotation", StoredW: 1920, StoredH: 1080, SARNum: 1, SARDen: 1, Rotation: 0},
+		{Name: "pal_dv_widescreen", StoredW: 720, StoredH: 576, SARNum: 64, SARDen: 45, Rotation: 0},
+		{Name: "pal_dv_standard", StoredW: 720, StoredH: 576, SARNum: 16, SARDen: 15, Rotation: 0},
+		{Name: "ntsc_dv", StoredW: 720, StoredH: 480, SARNum: 32, SARDen: 27, Rotation: 0},
+		{Name: "anamorphic_rotated_90", StoredW: 720, StoredH: 576, SARNum: 64, SARDen: 45, Rotation: 90},
+		{Name: "square_rotated_270", StoredW: 1280, StoredH: 720, SARNum: 1, SARDen: 1, Rotation: 270},
+		{Name: "unknown_sar_is_square", StoredW: 640, StoredH: 480, SARNum: 0, SARDen: 1, Rotation: 0},
+		{Name: "hdv_1440_anamorphic", StoredW: 1440, StoredH: 1080, SARNum: 4, SARDen: 3, Rotation: 0},
+	}
+	for _, c := range dsInputs {
+		c.DisplayW, c.DisplayH = DisplaySize(c.StoredW, c.StoredH, c.SARNum, c.SARDen, c.Rotation)
+		fix.DisplaySize = append(fix.DisplaySize, c)
+	}
+	data, err := json.MarshalIndent(fix, "", "  ")
 	if err != nil {
 		t.Fatal(err)
 	}

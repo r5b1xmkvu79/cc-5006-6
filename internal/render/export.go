@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"oralcut/internal/geometry"
+	"oralcut/internal/media"
 	"oralcut/internal/project"
 )
 
@@ -42,6 +43,9 @@ type ClipManifest struct {
 	Out          float64 `json:"out,omitempty"`
 	Dwell        float64 `json:"dwell,omitempty"`
 	Duration     float64 `json:"duration"`
+	// Description references the unified versioned media description the
+	// render was based on (format v2 projects).
+	Description  *media.Description `json:"description,omitempty"`
 	Placeholder  bool    `json:"placeholder"`
 	Reason       string  `json:"reason,omitempty"`
 }
@@ -50,6 +54,7 @@ type ClipManifest struct {
 type Manifest struct {
 	ProjectID   string          `json:"projectId"`
 	ProjectTitle string         `json:"projectTitle"`
+	FormatVersion int           `json:"formatVersion,omitempty"`
 	Canvas      project.Canvas  `json:"canvas"`
 	ExportedAt  string          `json:"exportedAt"`
 	Output      string          `json:"output"`
@@ -77,6 +82,7 @@ func (e *Exporter) Export(p *project.Project, opts Options) (*Manifest, error) {
 	var args []string
 	manifest := &Manifest{
 		ProjectID: p.ID, ProjectTitle: p.Title, Canvas: p.Canvas,
+		FormatVersion: p.FormatVersion,
 		ExportedAt: time.Now().UTC().Format(time.RFC3339),
 		Output: opts.OutPath,
 	}
@@ -91,6 +97,9 @@ func (e *Exporter) Export(p *project.Project, opts Options) (*Manifest, error) {
 			ClipID: clip.ID, Label: clip.Label, MediaID: clip.MediaID,
 			Fit: string(clip.Fit), DisplayClaim: clip.DisplayClaim(),
 			Duration: clip.Duration(),
+		}
+		if m != nil {
+			cm.Description = m.Description
 		}
 		if clip.Fit == geometry.FitCrop {
 			c := clip.Crop
@@ -231,7 +240,8 @@ func (e *Exporter) buildClip(g *graph, args []string, p *project.Project,
 	inIdx := len(g.inputs)
 	g.inputs = append(g.inputs, m.Path)
 
-	// 1) Normalize rotation first.
+	// 1) Normalize rotation first, then pixel aspect ratio: coded pixels
+	// become square display pixels before any composition math.
 	var pre strings.Builder
 	fmt.Fprintf(&pre, "[%d:v]", inIdx)
 	if clip.Kind == project.ClipVideo {
@@ -240,6 +250,7 @@ func (e *Exporter) buildClip(g *graph, args []string, p *project.Project,
 		pre.WriteString("setpts=PTS-STARTPTS,")
 	}
 	pre.WriteString(rotationFilters(m))
+	pre.WriteString(pixelAspectFilters(m))
 
 	// 2) Composition on the normalized frame.
 	pre.WriteString(fitFilters(p, clip, m, cw, ch, idx))
@@ -301,10 +312,27 @@ func exifOrientationOf(m *project.Media) int {
 	return m.EXIFOrientation
 }
 
+// pixelAspectFilters normalizes non-square pixels to true display
+// dimensions before composition. Runs after rotation normalization, so
+// the target is the description's display size. Square-pixel sources (and
+// legacy pre-migration media without a description) need nothing.
+func pixelAspectFilters(m *project.Media) string {
+	if m.Description == nil {
+		return ""
+	}
+	d := m.Description
+	if d.SARNum <= 0 || d.SARDen <= 0 || d.SARNum == d.SARDen {
+		return ""
+	}
+	return fmt.Sprintf("scale=%d:%d:flags=lanczos,setsar=1,", d.DisplayWidth, d.DisplayHeight)
+}
+
 // fitFilters builds the composition chain for one clip. idx uniquifies
-// filter labels inside the shared graph.
+// filter labels inside the shared graph. Composition happens in display
+// space: the source has already been rotation- and SAR-normalized.
 func fitFilters(p *project.Project, clip *project.Clip, m *project.Media, cw, ch, idx int) string {
-	sw, sh := float64(m.Width), float64(m.Height)
+	dw, dh := m.DisplayDims()
+	sw, sh := float64(dw), float64(dh)
 	cwf, chf := float64(cw), float64(ch)
 
 	switch clip.Fit {
@@ -368,7 +396,8 @@ func fitFilters(p *project.Project, clip *project.Clip, m *project.Media, cw, ch
 // viewport moving linearly over the dwell. The viewport is validated to
 // stay inside the scaled image for the whole range.
 func panFilters(p *project.Project, clip *project.Clip, m *project.Media, cw, ch int) string {
-	sw, sh := float64(m.Width), float64(m.Height)
+	dw, dh := m.DisplayDims()
+	sw, sh := float64(dw), float64(dh)
 	pan := *clip.Pan
 	// Resolve endpoints against the rounded scaled size actually used.
 	base := coverScaleF(sw, sh, float64(cw), float64(ch))

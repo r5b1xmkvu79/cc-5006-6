@@ -44,7 +44,8 @@ func assetsDir(t *testing.T) string {
 	return abs
 }
 
-// probeMedia builds a project.Media from a probed file.
+// probeMedia builds a project.Media from a probed file, with the unified
+// media description attached (format v2).
 func probeMedia(t *testing.T, ffprobe, id, path string) project.Media {
 	t.Helper()
 	info, err := media.NewProber(ffprobe).Probe(path)
@@ -53,9 +54,10 @@ func probeMedia(t *testing.T, ffprobe, id, path string) project.Media {
 	}
 	return project.Media{
 		ID: id, Path: path, SHA256: info.SHA256,
-		Kind: string(info.Kind), Width: info.Width, Height: info.Height,
+		Kind: string(info.Kind), Width: info.DisplayWidth, Height: info.DisplayHeight,
 		Rotation: info.Rotation, EXIFOrientation: info.EXIFOrientation,
 		Duration: info.Duration, HasAudio: info.HasAudio, Title: info.Title,
+		Description: media.DescriptionFromInfo(info),
 		Status: project.StatusOK,
 	}
 }
@@ -322,6 +324,53 @@ func TestExportEndToEnd(t *testing.T) {
 	if manifest.Clips[0].SourceSHA256 == "" {
 		t.Error("manifest must carry original file hashes")
 	}
+}
+
+// TestExportAnamorphicDV proves non-square pixels are normalized to true
+// display dimensions before composition: coded 720x576 @ 64:45 displays
+// as 1024x576 (16:9) and fills the canvas exactly. Treated as coded
+// dimensions it would pillarbox with black side bars instead.
+func TestExportAnamorphicDV(t *testing.T) {
+	ffmpeg, ffprobe := toolchain(t)
+	assets := assetsDir(t)
+	p := project.New("dvcheck", "非方形像素导出测试")
+	p.Media = []project.Media{probeMedia(t, ffprobe, "dv", filepath.Join(assets, "dv_anamorphic.mp4"))}
+	m := p.MediaByID("dv")
+	if m.Description == nil || m.Description.DisplayWidth != 1024 || m.Description.DisplayHeight != 576 {
+		t.Fatalf("dv description = %+v", m.Description)
+	}
+	p.Clips = []project.Clip{
+		{ID: "c1", MediaID: "dv", Kind: project.ClipVideo, Label: "DV宽屏",
+			In: 0, Out: 2, Fit: geometry.FitFull},
+	}
+	dir := t.TempDir()
+	out := filepath.Join(dir, "dv.mp4")
+	exp := &Exporter{FFmpeg: ffmpeg, TempDir: filepath.Join(dir, "tmp")}
+	manifest, err := exp.Export(p, Options{OutPath: out})
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	// The manifest references the unified description.
+	if manifest.Clips[0].Description == nil || manifest.Clips[0].Description.SARNum != 64 {
+		t.Fatalf("manifest description = %+v", manifest.Clips[0].Description)
+	}
+	if manifest.FormatVersion != project.FormatVersionCurrent {
+		t.Errorf("manifest formatVersion = %d", manifest.FormatVersion)
+	}
+
+	png := filepath.Join(dir, "frame.png")
+	runFFmpeg(t, ffmpeg, "-ss", "1.0", "-i", out, "-frames:v", "1", "-y", png)
+	f := decodeImg(t, png)
+	// Exact 16:9 fill: corner markers land on the canvas corners and the
+	// side bars are content, not letterbox black.
+	assertColor(t, f, 30, 30, "red")
+	assertColor(t, f, 1889, 30, "green")
+	assertColor(t, f, 30, 1049, "yellow")
+	assertColor(t, f, 1889, 1049, "blue")
+	assertColor(t, f, 960, 6, "magenta")
+	assertColor(t, f, 960, 1073, "cyan")
+	assertColor(t, f, 10, 540, "notblack")
+	assertColor(t, f, 1909, 540, "notblack")
 }
 
 func TestProjectReopen(t *testing.T) {
